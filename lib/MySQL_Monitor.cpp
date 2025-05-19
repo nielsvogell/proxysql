@@ -3474,20 +3474,19 @@ VALGRIND_ENABLE_ERROR_REPORTING;
 */
 void MySQL_Monitor::process_discovered_topology(const std::string& originating_server_hostname, const vector<MYSQL_ROW>& discovered_servers, const MySQL_Monitor_State_Data* mmsd, int num_fields) {
 	// Check if the query needs to be changed because it matches a blue/green deployment: exactly 3 entries for Multi-AZ DB Clusters, even number for blue/green deployment
-	if (rds_topology_check_type == AWS_RDS_TOPOLOGY_CHECK && discovered_servers.size() % 2 == 0) {
+	if (current_rds_topology_check_type == AWS_RDS_TOPOLOGY_CHECK && discovered_servers.size() % 2 == 0) {
 		// With the AWS_RDS_TOPOLOGY_CHECK, we didn't get the role and status data, so we retry with the correct query on the next read_only check
 		rds_topology_check_type = AWS_RDS_BLUE_GREEN_DEPLOYMENT_STATE_CHECK;
 		topology_loop = mysql_thread___monitor_aws_rds_topology_discovery_interval;
 		return;
-	} else if ((rds_topology_check_type == AWS_RDS_TOPOLOGY_CHECK && discovered_servers.size() != 3) 
-			|| (rds_topology_check_type == AWS_RDS_BLUE_GREEN_DEPLOYMENT_STATE_CHECK && discovered_servers.size() % 2 != 0)) {
+	} else if ((current_rds_topology_check_type == AWS_RDS_TOPOLOGY_CHECK && discovered_servers.size() != 3) 
+			|| (current_rds_topology_check_type == AWS_RDS_BLUE_GREEN_DEPLOYMENT_STATE_CHECK && blue_green_deployment_switchover_completed && discovered_servers.size() % 2 != 0)) {
 		// Query result matches neither a Multi_AZ DB Cluster nor a Blue/Green deployment
 		// TODO: Account for topology metadata towards the end of a blue/green deployment switchover (possibly odd number of entries)
 		rds_topology_check_type = AWS_RDS_TOPOLOGY_CHECK; // Set back to default rds_topology check
 		proxy_debug(PROXY_DEBUG_MONITOR, 7, "Got a query result for the rds_topology metadata table but it matches neither Multi-AZ DB Clusters, nor a blue/green deployment. Number of records: %d\n", discovered_servers.size());
 		return;
 	}
-
 
 	if (num_fields < 4) {
 		proxy_error("Received row with too few fields. num_field = %d\n", num_fields);
@@ -3552,6 +3551,22 @@ VALGRIND_ENABLE_ERROR_REPORTING;
 		if (!current_discovered_status.empty() && !current_discovered_role.empty() && !can_rds_topology_server_receive_traffic(current_discovered_role, current_discovered_status)) {
 			current_determined_weight = (int64_t)(0L);
 		}
+
+		if (!current_discovered_status.empty() && is_aws_rds_frequent_polling_switchover_status(current_discovered_status)) {
+			blue_green_deployment_frequent_polling_enabled = true;
+		} else {
+			blue_green_deployment_frequent_polling_enabled = false;
+		}
+
+		if (!current_discovered_status.empty() && "SWITCHOVER_COMPLETED" == current_discovered_status) {
+			if (!blue_green_deployment_switchover_completed) {
+				trigger_dns_cache_update();
+			}
+			blue_green_deployment_switchover_completed = true;
+		} else {
+			blue_green_deployment_switchover_completed = false;
+		}
+
 		int32_t use_ssl = 0;
 		if (mmsd->use_ssl) {
 			use_ssl = 1;
@@ -3656,7 +3671,7 @@ bool MySQL_Monitor::mysql_row_matches_query_task(const unordered_set<string> &fi
 
 void MySQL_Monitor::add_topology_query_to_task(MySQL_Monitor_State_Data_Task_Type &task_type)
 {
-	switch (rds_topology_check_type) {
+	switch (current_rds_topology_check_type) {
 		case AWS_RDS_TOPOLOGY_CHECK:
 			if (task_type == MON_READ_ONLY)
 				task_type = MON_READ_ONLY__AND__AWS_RDS_TOPOLOGY_DISCOVERY;
@@ -3709,6 +3724,10 @@ void * MySQL_Monitor::monitor_read_only() {
 			goto __sleep_monitor_read_only;
 		}
 		next_loop_at=t1+1000*mysql_thread___monitor_read_only_interval;
+		if (blue_green_deployment_frequent_polling_enabled) {
+			next_loop_at=t1+1000*blue_green_deployment_frequent_polling_interval;
+			topology_loop = topology_loop_max;
+		}
 		proxy_debug(PROXY_DEBUG_ADMIN, 4, "%s\n", query);
 		resultset = MyHGM->execute_query(query, &error);
 		assert(resultset);
@@ -3721,17 +3740,12 @@ void * MySQL_Monitor::monitor_read_only() {
 			goto __end_monitor_read_only_loop;
 		}
 
-		if (topology_loop_max > 0) { // if the discovery interval is set to zero, do not query for the topology
-			if (topology_loop >= topology_loop_max) {
-				if (rds_topology_check_type == NONE) {
-					proxy_info("Setting topology check to aws_rds_topology_check\n");
-					rds_topology_check_type = AWS_RDS_TOPOLOGY_CHECK;
-				}
-				topology_loop = 0;
-			} 
-			topology_loop += 1;
+		if (topology_loop_max > 0 && topology_loop >= topology_loop_max) { // if the discovery interval is set to zero, do not query for the topology
+			current_rds_topology_check_type = rds_topology_check_type;
+			topology_loop = 0; // Forces at least one read_only check without topology discovery (in case the topology table doesn't exist and the query returns an empty result)
 		} else {
-			rds_topology_check_type = NONE;
+			current_rds_topology_check_type = NONE;
+			topology_loop += 1;
 		}
 
 		// resultset must be initialized before calling monitor_read_only_async
@@ -7703,6 +7717,7 @@ bool MySQL_Monitor::monitor_read_only_process_ready_tasks(const std::vector<MySQ
 		time_now = time_now - (mmsd->t2 - mmsd->t1);
 		rc = (*proxy_sqlite3_bind_int64)(statement, 3, time_now); ASSERT_SQLITE_OK(rc, mmsd->mondb);
 		rc = (*proxy_sqlite3_bind_int64)(statement, 4, (mmsd->mysql_error_msg ? 0 : mmsd->t2 - mmsd->t1)); ASSERT_SQLITE_OK(rc, mmsd->mondb);
+		int num_rows = 0;
 		if (mmsd->interr == 0 && mmsd->result) {
 			int num_fields = 0;
 			int k = 0;
@@ -7710,9 +7725,10 @@ bool MySQL_Monitor::monitor_read_only_process_ready_tasks(const std::vector<MySQ
 			int i_ro = -1;
 			num_fields = mysql_num_fields(mmsd->result);
 			fields = mysql_fetch_fields(mmsd->result);
+			num_rows = mysql_num_rows(mmsd->result);
 			unordered_set<string> field_names;
 			MYSQL_ROW row;
-			if (fields && num_fields >= 1) {
+			if (fields && num_fields >= 1 && num_rows > 0) {
 				for (k = 0; k < num_fields; k++) {
 					if (strcmp((char*)"read_only", (char*)fields[k].name) == 0) {
 						i_ro = k;
@@ -7750,6 +7766,9 @@ VALGRIND_ENABLE_ERROR_REPORTING;
 						process_discovered_topology(originating_server_hostname, discovered_servers, mmsd, num_fields);
 					}
 				}
+			} else if (num_rows == 0) {
+				proxy_debug(PROXY_DEBUG_MONITOR, 7, "rds_topology query did not return a result. Skipping read_only check.\n");
+				rc = (*proxy_sqlite3_bind_null)(statement, 5); ASSERT_SQLITE_OK(rc, mmsd->mondb);
 			} else {
 				proxy_error("mysql_fetch_fields returns NULL, or mysql_num_fields is incorrect. Server %s:%d . See bug #1994\n", mmsd->hostname, mmsd->port);
 				rc = (*proxy_sqlite3_bind_null)(statement, 5); ASSERT_SQLITE_OK(rc, mmsd->mondb);
@@ -7763,6 +7782,9 @@ VALGRIND_ENABLE_ERROR_REPORTING;
 			// make sure it is clear
 			mysql_free_result(mmsd->result);
 			mmsd->result = NULL;
+		}
+		if (current_rds_topology_check_type != NONE && num_rows == 0 ) {
+			continue; // Skips read_only check if query for rds_topology returns an empty result. Next check will not query the topology table unless during a blue/green deployment switchover 
 		}
 		rc = (*proxy_sqlite3_bind_text)(statement, 6, mmsd->mysql_error_msg, -1, SQLITE_TRANSIENT); ASSERT_SQLITE_OK(rc, mmsd->mondb);
 		SAFE_SQLITE3_STEP2(statement);
@@ -7836,7 +7858,7 @@ void MySQL_Monitor::monitor_read_only_async(SQLite3_result* resultset) {
 
 				// Change task type if it's time to do discovery check. Only for aws rds endpoints
 				string hostname = r->fields[0];
-				if (hostname.find(AWS_ENDPOINT_SUFFIX_STRING) != std::string::npos && rds_topology_check_type != NONE) {
+				if (hostname.find(AWS_ENDPOINT_SUFFIX_STRING) != std::string::npos && current_rds_topology_check_type != NONE) {
 					add_topology_query_to_task(task_type);
 				}
 			}
@@ -8666,4 +8688,9 @@ bool MySQL_Monitor::can_rds_topology_server_receive_traffic(const string &role, 
 		proxy_warning("Attempted check for permitted traffic for a role that is neither Blue/Green Deployment source, nor target (%s). Allowing traffic by default.\n", role.c_str());
 		return true;
 	}
+}
+
+bool MySQL_Monitor::is_aws_rds_frequent_polling_switchover_status(const string &status)
+{
+	return (status == "SWITCHOVER_IN_PROGRESS" || status == "SWITCHOVER_INITIATED");
 }

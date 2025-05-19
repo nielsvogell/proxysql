@@ -485,6 +485,7 @@ class MySQL_Monitor {
 	bool is_aws_rds_topology_version_supported(const string& version);
 	bool has_discovered_server_changed(const tuple<string, uint16_t, uint32_t, int64_t, int32_t>& discovered_server);
 	static bool can_rds_topology_server_receive_traffic(const string &role, const string &status);
+	static bool is_aws_rds_frequent_polling_switchover_status(const string &status);
 
 	private:
 	std::vector<table_def_t *> *tables_defs_monitor;
@@ -536,8 +537,12 @@ class MySQL_Monitor {
 	bool shutdown;
 	pthread_mutex_t mon_en_mutex;
 	bool monitor_enabled;
+	MySQL_Monitor_Aws_Metadata_Check current_rds_topology_check_type = MySQL_Monitor_Aws_Metadata_Check::NONE;
 	MySQL_Monitor_Aws_Metadata_Check rds_topology_check_type = MySQL_Monitor_Aws_Metadata_Check::AWS_RDS_TOPOLOGY_CHECK;
 	int topology_loop = 0;
+	bool blue_green_deployment_frequent_polling_enabled = false;
+	bool blue_green_deployment_switchover_completed = false;
+	unsigned long long blue_green_deployment_frequent_polling_interval = 100;
 	SQLite3DB *admindb;	// internal database
 	SQLite3DB *monitordb;	// internal database
 	SQLite3DB *monitor_internal_db;	// internal database
