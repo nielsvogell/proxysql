@@ -6725,6 +6725,17 @@ int MySQL_HostGroups_Manager::create_new_server_in_hg(
 			);
 
 			res = 0;
+		} else if (mysrvc && srv_info.kind == "AWS RDS") {
+			mysrvc->weight = srv_opts.weigth;
+			update_hg_attrs_server_defaults(mysrvc, mysrvc->myhgc);
+			mysrvc->set_status(MYSQL_SERVER_STATUS_ONLINE);
+
+			proxy_info(
+				"Found previously discovered %s node %s:%d in hig %d, which is part of a blue/green deployment and has new weight %ld.\n",
+				srv_info.kind.c_str(), srv_info.addr.c_str(), srv_info.port, hid, mysrvc->weight
+			);
+
+			res = 0;
 		}
 	}
 

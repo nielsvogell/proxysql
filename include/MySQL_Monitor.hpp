@@ -484,6 +484,7 @@ class MySQL_Monitor {
 	void add_topology_query_to_task(MySQL_Monitor_State_Data_Task_Type &task_type);
 	bool is_aws_rds_topology_version_supported(const string& version);
 	bool has_discovered_server_changed(const tuple<string, uint16_t, uint32_t, int64_t, int32_t>& discovered_server);
+	static bool can_rds_topology_server_receive_traffic(const string &role, const string &status);
 
 	private:
 	std::vector<table_def_t *> *tables_defs_monitor;

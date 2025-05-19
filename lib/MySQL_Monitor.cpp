@@ -3548,7 +3548,10 @@ VALGRIND_ENABLE_ERROR_REPORTING;
 			return;
 		}
 
-		int64_t current_determined_weight = (int64_t)(-1L); // TODO: Add logic for selecting a different weight based on discovered role and status
+		int64_t current_determined_weight = (int64_t)(-1L); 
+		if (!current_discovered_status.empty() && !current_discovered_role.empty() && !can_rds_topology_server_receive_traffic(current_discovered_role, current_discovered_status)) {
+			current_determined_weight = (int64_t)(0L);
+		}
 		int32_t use_ssl = 0;
 		if (mmsd->use_ssl) {
 			use_ssl = 1;
@@ -8648,4 +8651,19 @@ template class WorkItem<DNS_Resolve_Data>;
 bool MySQL_Monitor::is_aws_rds_topology_version_supported(const string& version) {
 	// TODO: implement better check that considers minor and major versions
 	return version == SUPPORTED_AWS_RDS_TOPOLOGY_VERSION;
+}
+
+bool MySQL_Monitor::can_rds_topology_server_receive_traffic(const string &role, const string &status)
+{
+	if (role == "BLUE_GREEN_DEPLOYMENT_SOURCE") {
+		return status == "AVAILABLE"
+			|| status == "SWITCHOVER_INITIATED"
+			|| status == "SWITCHOVER_IN_PROGRESS"; // remove this line to disallow read traffic during replica catch-up
+	} else if (role == "BLUE_GREEN_DEPLOYMENT_TARGET") {
+		return status == "SWITCHOVER_IN_POST_PROCESSING"
+			|| status == "SWITCHOVER_COMPLETED";
+	} else {
+		proxy_warning("Attempted check for permitted traffic for a role that is neither Blue/Green Deployment source, nor target (%s). Allowing traffic by default.\n", role.c_str());
+		return true;
+	}
 }
