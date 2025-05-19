@@ -484,8 +484,12 @@ class MySQL_Monitor {
 	void add_topology_query_to_task(MySQL_Monitor_State_Data_Task_Type &task_type);
 	bool is_aws_rds_topology_version_supported(const string& version);
 	bool has_discovered_server_changed(const tuple<string, uint16_t, uint32_t, int64_t, int32_t>& discovered_server);
+	static bool is_aws_cluster_read_only_endpoint(const string &endpoint);
+	static bool are_matching_bgd_endpoints(const string& endpoint1, const string& endpoint2);
+	static bool is_valid_bgd_custom_endpoint_pair(const string& blue, const string& green);
 	static bool can_rds_topology_server_receive_traffic(const string &role, const string &status);
 	static bool is_aws_rds_frequent_polling_switchover_status(const string &status);
+	void make_aws_cluster_read_only_endpoint(string& endpoint);
 
 	private:
 	std::vector<table_def_t *> *tables_defs_monitor;

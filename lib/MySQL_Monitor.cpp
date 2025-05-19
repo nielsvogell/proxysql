@@ -3495,6 +3495,7 @@ void MySQL_Monitor::process_discovered_topology(const std::string& originating_s
 
 	uint32_t writer_hostgroup = (uint32_t)(mmsd->writer_hostgroup);
 	uint32_t reader_hostgroup = (uint32_t)(mmsd->reader_hostgroup);
+	bool use_read_only_endpoints = is_aws_cluster_read_only_endpoint(originating_server_hostname);
 	
 	int32_t use_ssl = 0;
 	if (mmsd->use_ssl) {
@@ -3524,6 +3525,16 @@ VALGRIND_DISABLE_ERROR_REPORTING;
 		}
 VALGRIND_ENABLE_ERROR_REPORTING;
 		string current_discovered_hostname = row[2];
+
+		if (use_read_only_endpoints) {
+			make_aws_cluster_read_only_endpoint(current_discovered_hostname);
+		}
+
+		// We only want to update the monitored endpoint and its corresponding green (or blue) one
+		if (current_rds_topology_check_type == AWS_RDS_BLUE_GREEN_DEPLOYMENT_STATE_CHECK && !are_matching_bgd_endpoints(originating_server_hostname, current_discovered_hostname)) {
+			continue;
+		}
+
 		string current_discovered_port_string = row[3];
 		uint16_t current_discovered_port;
 		try {
@@ -3687,6 +3698,84 @@ void MySQL_Monitor::add_topology_query_to_task(MySQL_Monitor_State_Data_Task_Typ
 		default:
 			proxy_warning("Attempting to add rds_topology query to unsupported read_only check.");
 	}
+}
+
+bool MySQL_Monitor::is_aws_cluster_read_only_endpoint(const string &endpoint) {
+	// Shortest valid cluster read only endpoint: a.cluster-ro-b.us-east-1.rds.amazonaws.com (42)
+    if (endpoint.length() < 42 || endpoint.substr(endpoint.length() - 18) != ".rds.amazonaws.com") {
+        return false;
+    }
+
+    // Check that the identifier is followed by '.cluster-ro'
+    return endpoint.find(".cluster-ro-") != string::npos;
+}
+
+void MySQL_Monitor::make_aws_cluster_read_only_endpoint(string &endpoint) {
+	// Find the position of ".cluster-"
+	size_t clusterPos = endpoint.find(".cluster-");
+
+	if (clusterPos == std::string::npos) {
+		proxy_error("%s is not a valid cluster endpoint", endpoint.c_str());
+	}
+
+	// Check if the endpoint is already a read-only endpoint
+	if (endpoint.substr(clusterPos, 12) == ".cluster-ro-") {
+		return; // Already a read-only endpoint
+	}
+
+	// Insert "-ro" after "cluster-"
+	endpoint.insert(clusterPos + 9, "ro-");
+
+	return;
+}
+
+/**
+ * Checks that two strings are RDS/Aurora endpoint matches in the blue/green deployment sense. That is, they 
+ * - are either the same
+ * - or only differ by the suffix "-green-<alphanumeric strin>" before the full domain
+ * Examples:
+ * - foo.bar.com and foo.bar.com              are matching
+ * - foo.bar.com and foo-green-abcde1.bar.com are matching
+ * - foo.bar.com and foo.bar-doo.com          are not matching
+ * - foo.bar.com and foo-dee.bar.com          are not matching
+
+ */
+bool MySQL_Monitor::are_matching_bgd_endpoints(const string& endpoint1, const string& endpoint2) {
+	if (endpoint1 == endpoint2) {
+		return true;
+	}
+
+	std::string blue, green;
+	if (endpoint1.length() < endpoint2.length()) {
+		blue = endpoint1;
+		green = endpoint2;
+	} else {
+		green = endpoint1;
+		blue = endpoint2;
+	}
+
+	size_t blue_domain_start = blue.find('.');
+	size_t green_domain_start = green.find('.');
+	if (blue_domain_start == string::npos || green_domain_start == string::npos) {
+		return false; // one or both endpoints are not valid
+	}
+
+	if (blue_domain_start + 8 > green_domain_start) {
+		return false; // green endpoint cannot fit min suffix '-green-a' before domain
+	}
+
+	if (blue.substr(blue_domain_start) != green.substr(green_domain_start)) {
+		return false; // domains don't match
+	}
+
+	if (blue.substr(0, blue_domain_start) != green.substr(0, blue_domain_start)) {
+		return false; // endpoint base name not identical
+	}
+	if (green.substr(blue_domain_start, 7) == "-green-") {
+		const string green_substring = green.substr(blue_domain_start + 7, green_domain_start - blue_domain_start - 7);
+		return all_of(green_substring.begin(), green_substring.end(), [](unsigned char c){ return isalnum(c); });
+	}
+	return false;
 }
 
 void * MySQL_Monitor::monitor_read_only() {
