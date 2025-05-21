@@ -1087,6 +1087,7 @@ MySQL_Monitor::MySQL_Monitor() {
 	pthread_mutex_init(&aws_aurora_mutex,NULL);
 	pthread_mutex_init(&mysql_servers_mutex,NULL);
 	pthread_mutex_init(&proxysql_servers_mutex, NULL);
+	pthread_mutex_init(&rds_topology_servers_mutex, NULL);
 	AWS_Aurora_Hosts_resultset=NULL;
 	AWS_Aurora_Hosts_resultset_checksum = 0;
 	shutdown=false;
@@ -3495,11 +3496,16 @@ void MySQL_Monitor::process_discovered_topology(const std::string& originating_s
 
 	uint32_t writer_hostgroup = (uint32_t)(mmsd->writer_hostgroup);
 	uint32_t reader_hostgroup = (uint32_t)(mmsd->reader_hostgroup);
+	
+	int32_t use_ssl = 0;
+	if (mmsd->use_ssl) {
+		use_ssl = 1;
+	}
 
+	pthread_mutex_lock(&GloMyMon->rds_topology_servers_mutex);
 	// Add the queried server or update its entry in the topology server map with the current timestamp
 	if (!AWS_RDS_Topology_Server_Map.count(originating_server_hostname)) {
 		auto queried_server = make_shared<AWS_RDS_topology_server>(mmsd->hostname, (uint32_t)mmsd->port);
-
 		AWS_RDS_Topology_Server_Map.insert({ originating_server_hostname, queried_server });
 	}
 
@@ -3557,7 +3563,19 @@ VALGRIND_ENABLE_ERROR_REPORTING;
 		}
 
 		tuple<string, uint16_t, uint32_t, int64_t, int32_t> discovered_server(current_discovered_hostname, current_discovered_port, reader_hostgroup, current_determined_weight, use_ssl);
-		if (!AWS_RDS_Topology_Server_Map.count(current_discovered_hostname)) { // TODO: update to also check for updated fields
+		if (AWS_RDS_Topology_Server_Map.count(current_discovered_hostname) && has_discovered_server_changed(discovered_server)) {
+			// Server is already known but has changed
+			unordered_set<uint32_t> hostgroups = AWS_RDS_Topology_Server_Map[current_discovered_hostname]->reader_hostgroups;
+			hostgroups.merge(AWS_RDS_Topology_Server_Map[current_discovered_hostname]->reader_hostgroups);
+			for (uint32_t hg : hostgroups) {
+				std::get<2>(discovered_server) = hg;
+				proxy_info("%d: Adding changed host '%s' to new server list in hostgroup [%ld].\n", __LINE__, std::get<0>(discovered_server).c_str(), std::get<2>(discovered_server));
+				new_servers.push_back(discovered_server);
+			}
+			AWS_RDS_Topology_Server_Map[current_discovered_hostname]->port = current_discovered_port;
+			AWS_RDS_Topology_Server_Map[current_discovered_hostname]->weight = current_determined_weight;
+		}
+		if (!AWS_RDS_Topology_Server_Map.count(current_discovered_hostname)) {
 			// Server isn't in either hostgroup yet, adding as reader
 			proxy_info("%d: Adding new host '%s' to new server list in hostgroup [%ld].\n", __LINE__, std::get<0>(discovered_server).c_str(), std::get<2>(discovered_server));
 			new_servers.push_back(discovered_server);
@@ -3569,10 +3587,21 @@ VALGRIND_ENABLE_ERROR_REPORTING;
 		// TODO: Add logic to remove hosts if they disappear from metadata
 	}
 
+	pthread_mutex_unlock(&GloMyMon->rds_topology_servers_mutex);
 	// Add the new servers if any. The AWS_RDS_TOPOLOGY_CHECK is currently meant to only be used with RDS Multi-AZ DB clusters
 	if (!new_servers.empty() && (rds_topology_check_type != AWS_RDS_TOPOLOGY_CHECK || is_aws_rds_multi_az_db_cluster_topology(originating_server_hostname, new_servers))) {
 		MyHGM->add_discovered_servers_to_mysql_servers_and_replication_hostgroups(new_servers);
 	}
+}
+
+bool MySQL_Monitor::has_discovered_server_changed(const tuple<string, uint16_t, uint32_t, int64_t, int32_t>& discovered_server)
+{
+	string endpoint = std::get<0>(discovered_server);
+	uint16_t discovered_port = std::get<1>(discovered_server);
+	int64_t discovered_weight = std::get<3>(discovered_server);
+	uint16_t existing_port = AWS_RDS_Topology_Server_Map[endpoint]->port;
+	int64_t existing_weight = AWS_RDS_Topology_Server_Map[endpoint]->weight;
+	return discovered_port != existing_port || (discovered_weight == -1 && existing_weight == 0) || (discovered_weight == 0 && existing_weight == -1);
 }
 
 /**
@@ -3662,7 +3691,7 @@ void * MySQL_Monitor::monitor_read_only() {
 		char *error=NULL;
 		SQLite3_result *resultset=NULL;
 		// add support for SSL
-		char *query=(char *)"SELECT hostname, port, MAX(use_ssl) use_ssl, check_type, reader_hostgroup FROM mysql_servers JOIN mysql_replication_hostgroups ON hostgroup_id=writer_hostgroup OR hostgroup_id=reader_hostgroup WHERE status NOT IN (2,3) GROUP BY hostname, port ORDER BY RANDOM()";
+		char *query=(char *)"SELECT hostname, port, MAX(use_ssl) use_ssl, check_type, reader_hostgroup, writer_hostgroup FROM mysql_servers JOIN mysql_replication_hostgroups ON hostgroup_id=writer_hostgroup OR hostgroup_id=reader_hostgroup WHERE status NOT IN (2,3) GROUP BY hostname, port ORDER BY RANDOM()";
 		t1=monotonic_time();
 
 		if (!GloMTH) return NULL;	// quick exit during shutdown/restart
@@ -7813,6 +7842,7 @@ void MySQL_Monitor::monitor_read_only_async(SQLite3_result* resultset) {
 				new MySQL_Monitor_State_Data(task_type, r->fields[0], atoi(r->fields[1]), atoi(r->fields[2])));
 
 			mmsd->reader_hostgroup = atoi(r->fields[4]); // set reader_hostgroup
+			mmsd->writer_hostgroup = atoi(r->fields[5]); // set writer_hostgroup
 			mmsd->mondb = monitordb;
 			mmsd->mysql = My_Conn_Pool->get_connection(mmsd->hostname, mmsd->port, mmsd.get());
 

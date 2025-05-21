@@ -134,13 +134,14 @@ class AWS_Aurora_monitor_node {
 class AWS_RDS_topology_server {
 	public:
 	string addr;
-	int port;
+	uint16_t port;
+	int64_t weight;
 	unordered_set<uint32_t> writer_hostgroups;
 	unordered_set<uint32_t> reader_hostgroups;
 	unordered_set<string> hosts_in_topology;
 
-	AWS_RDS_topology_server(const string &_str_a, int _p) : addr(_str_a), port(_p) {}
-
+	AWS_RDS_topology_server(const string &_str_a, uint16_t _p, int64_t _w = -1) : addr(_str_a), port(_p), weight(_w) { }
+	
 	void add_writer_hostgroup(uint32_t hg) { writer_hostgroups.insert(hg); }
 	void add_reader_hostgroup(uint32_t hg) { reader_hostgroups.insert(hg); }
 };
@@ -261,7 +262,7 @@ public:
 	unsigned long long t2;
 	char *hostname;
 	int port;
-	int writer_hostgroup; // used only by group replication
+	int writer_hostgroup; // used only by group replication and processing rds topology
 	int reader_hostgroup;
 	bool writer_is_also_reader; // used only by group replication
 	int  max_transactions_behind; // used only by group replication
@@ -482,6 +483,7 @@ class MySQL_Monitor {
 	bool mysql_row_matches_query_task(const unordered_set<string> &field_names, const MySQL_Monitor_State_Data_Task_Type &task_type);
 	void add_topology_query_to_task(MySQL_Monitor_State_Data_Task_Type &task_type);
 	bool is_aws_rds_topology_version_supported(const string& version);
+	bool has_discovered_server_changed(const tuple<string, uint16_t, uint32_t, int64_t, int32_t>& discovered_server);
 
 	private:
 	std::vector<table_def_t *> *tables_defs_monitor;
@@ -497,6 +499,7 @@ class MySQL_Monitor {
 	pthread_mutex_t aws_aurora_mutex; // for simplicity, a mutex instead of a rwlock
 	pthread_mutex_t mysql_servers_mutex; // for simplicity, a mutex instead of a rwlock
 	pthread_mutex_t proxysql_servers_mutex; 
+	pthread_mutex_t rds_topology_servers_mutex; 
 	//std::map<char *, MyGR_monitor_node *, cmp_str> Group_Replication_Hosts_Map;
 	std::map<std::string, MyGR_monitor_node *> Group_Replication_Hosts_Map;
 	SQLite3_result *Group_Replication_Hosts_resultset;
