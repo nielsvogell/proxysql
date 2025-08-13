@@ -3564,17 +3564,27 @@ VALGRIND_ENABLE_ERROR_REPORTING;
 		}
 
 		if (!current_discovered_status.empty() && is_aws_rds_frequent_polling_switchover_status(current_discovered_status)) {
+			if (!blue_green_deployment_frequent_polling_enabled) {
+				proxy_info("Starting frequent polling because of detected switchover status = %s on %s.\n", current_discovered_status.c_str(), originating_server_hostname.c_str());
+			}
 			blue_green_deployment_frequent_polling_enabled = true;
 		} else {
+			if (!current_discovered_status.empty() && blue_green_deployment_frequent_polling_enabled) {
+				proxy_info("Ending fast polling because of detected switchover status = %s on %s.\n", current_discovered_status.c_str(), originating_server_hostname.c_str());
+			}
 			blue_green_deployment_frequent_polling_enabled = false;
 		}
 
 		if (!current_discovered_status.empty() && "SWITCHOVER_COMPLETED" == current_discovered_status) {
 			if (!blue_green_deployment_switchover_completed) {
+				proxy_info("Triggering DNS update because of detected switchover status = SWITCHOVER_COMPLETED on %s.\n", originating_server_hostname.c_str());
 				trigger_dns_cache_update();
 			}
 			blue_green_deployment_switchover_completed = true;
 		} else {
+			if (blue_green_deployment_switchover_completed && current_discovered_status.empty()) {
+				proxy_debug(PROXY_DEBUG_MONITOR, 7, "Setting switchover status to incomplete because no status detected on %s.\n", originating_server_hostname.c_str());
+			}
 			blue_green_deployment_switchover_completed = false;
 		}
 
