@@ -3605,7 +3605,7 @@ VALGRIND_ENABLE_ERROR_REPORTING;
 		if (AWS_RDS_Topology_Server_Map.count(current_discovered_hostname) && has_discovered_server_changed(discovered_server)) {
 			// Server is already known but has changed
 			unordered_set<uint32_t> hostgroups = AWS_RDS_Topology_Server_Map[current_discovered_hostname]->reader_hostgroups;
-			hostgroups.merge(AWS_RDS_Topology_Server_Map[current_discovered_hostname]->reader_hostgroups);
+			hostgroups.merge(AWS_RDS_Topology_Server_Map[current_discovered_hostname]->writer_hostgroups);
 			for (uint32_t hg : hostgroups) {
 				std::get<2>(discovered_server) = hg;
 				proxy_info("%d: Adding changed host '%s' to new server list in hostgroup [%ld].\n", __LINE__, std::get<0>(discovered_server).c_str(), std::get<2>(discovered_server));
